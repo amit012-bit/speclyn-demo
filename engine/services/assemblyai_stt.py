@@ -1,27 +1,33 @@
 """
-assemblyai_stt.py — AssemblyAI real-time speech-to-text integration.
+assemblyai_stt.py — AssemblyAI realtime STT support (Universal-3.5 Pro).
 
-NOTE ON API VERSION: the original build spec sketched `aai.RealtimeTranscriber`,
-which is DEPRECATED. This module uses the current (2026) streaming API:
-`assemblyai.streaming.v3.StreamingClient`. See
-https://github.com/AssemblyAI/assemblyai-python-sdk for the reference.
+Architecture (per AssemblyAI's official browser pattern): the BROWSER connects
+directly to `wss://streaming.assemblyai.com/v3/ws` using a short-lived token
+minted here, server-side — the API key never reaches the client. Final Turn
+transcripts then feed Speclyn's existing text realtime loop (frontend →
+backend Socket.io relay → engine /stream). No audio flows through our servers.
 
-Voice is a Phase-4 feature. Until an ASSEMBLYAI_API_KEY is configured, the
-engine's /stream endpoint accepts TEXT transcript chunks directly and this
-module reports unavailable — the product degrades gracefully to text mode,
-per the spec ("never show an error that blocks the user").
+Realtime parameters verified against live AssemblyAI docs (2026-08):
+  speech_model=universal-3-5-pro · mode=balanced · domain=medical-v1
+  keyterms_prompt (≤100 terms) · sample_rate=16000
 """
 
 import logging
 import os
-from typing import Callable
+
+import httpx
 
 logger = logging.getLogger("speclyn.stt")
 
-SAMPLE_RATE = 16_000
+TOKEN_URL = "https://streaming.assemblyai.com/v3/token"
+TOKEN_EXPIRES_SECONDS = 60  # single-use; minted per encounter start
 
-# Medical terminology boost — common clinical terms generic STT mishears.
-MEDICAL_WORD_BOOST = [
+# Medical Mode — clinical vocabulary tuning on U3.5 Pro realtime.
+STT_DOMAIN = "medical-v1"
+
+# Domain terms beyond what medical mode covers — coding/HCC jargon and the
+# common clinical abbreviations Speclyn cares about. ≤100 terms (API cap).
+MEDICAL_KEYTERMS = [
     "HCC", "ICD-10", "CPT", "HbA1c", "eGFR", "HFrEF", "HFpEF",
     "RAF", "Medicare Advantage", "CKD", "COPD", "CHF", "CVA",
     "metformin", "lisinopril", "furosemide", "atorvastatin",
@@ -31,49 +37,32 @@ MEDICAL_WORD_BOOST = [
 ]
 
 
+def _api_key() -> str:
+    """AssemblyAI key — accepts ASSEMBLYAI_API_KEY (canonical) or the
+    common misspelling ASSEMBLY_API_KEY."""
+    return os.environ.get("ASSEMBLYAI_API_KEY") or os.environ.get("ASSEMBLY_API_KEY", "")
+
+
 def stt_available() -> bool:
     """True when an AssemblyAI key is configured."""
-    return bool(os.environ.get("ASSEMBLYAI_API_KEY"))
+    return bool(_api_key())
 
 
-def create_streaming_client(
-    on_turn: Callable[[str, bool], None],
-    on_error: Callable[[Exception], None],
-):
-    """Create a v3 StreamingClient wired to the given callbacks.
+async def mint_streaming_token(expires_in_seconds: int = TOKEN_EXPIRES_SECONDS) -> str:
+    """Mint a single-use realtime token for a browser client.
 
-    on_turn(transcript_text, end_of_turn) fires as transcript turns arrive.
-    Returns the connected-ready client; caller is responsible for
-    client.connect(...) / client.stream(...) / client.disconnect().
-
-    Raises RuntimeError when no API key is configured — callers should check
-    stt_available() first and fall back to text mode.
+    Note: the Authorization header is the RAW key — no 'Bearer' prefix
+    (AssemblyAI STT convention). Raises for HTTP errors; callers translate
+    to a clean API response.
     """
     if not stt_available():
-        raise RuntimeError(
-            "ASSEMBLYAI_API_KEY not configured — voice transcription unavailable, "
-            "use text mode."
+        raise RuntimeError("ASSEMBLYAI_API_KEY not configured")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(
+            TOKEN_URL,
+            params={"expires_in_seconds": expires_in_seconds},
+            headers={"Authorization": _api_key()},
         )
-
-    from assemblyai.streaming.v3 import (
-        StreamingClient,
-        StreamingClientOptions,
-        StreamingError,
-        StreamingEvents,
-        TurnEvent,
-    )
-
-    client = StreamingClient(
-        StreamingClientOptions(api_key=os.environ["ASSEMBLYAI_API_KEY"])
-    )
-
-    def _handle_turn(_client, event: TurnEvent):
-        on_turn(event.transcript, bool(getattr(event, "end_of_turn", False)))
-
-    def _handle_error(_client, error: StreamingError):
-        logger.error("AssemblyAI streaming error: %s", error)
-        on_error(Exception(str(error)))
-
-    client.on(StreamingEvents.Turn, _handle_turn)
-    client.on(StreamingEvents.Error, _handle_error)
-    return client
+        response.raise_for_status()
+        return response.json()["token"]

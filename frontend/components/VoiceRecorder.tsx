@@ -1,81 +1,201 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { getSttToken, type SttTokenResponse } from "@/lib/api";
+import { MicCapture, MicPermissionError } from "@/lib/audio";
 
-type MicStatus = "requesting" | "granted" | "denied";
+type VoiceStatus = "connecting" | "recording" | "unavailable";
 
 interface VoiceRecorderProps {
-  /** Emits a transcript chunk (typed fallback today, AssemblyAI in Phase 4). */
+  /** Emits a FINAL transcript turn — the parent accumulates the full text. */
   onTranscript: (text: string) => void;
+  /** Live unfinalized turn text (cleared with "" when the turn finalizes). */
+  onPartial?: (text: string) => void;
 }
 
 const WAVEFORM_BARS = [0, 150, 300, 450, 600, 750, 900];
 
+const ASSEMBLYAI_WSS = "wss://streaming.assemblyai.com/v3/ws";
+
+/** Shape of AssemblyAI v3 streaming messages we care about. */
+interface AssemblyAiTurnMessage {
+  type?: string;
+  transcript?: string;
+  end_of_turn?: boolean;
+}
+
 /**
- * Microphone capture via the Web Audio API (getUserMedia + MediaRecorder).
+ * Real-time voice transcription via AssemblyAI v3 streaming.
  *
- * PHASE 4 NOTE: streaming the captured audio to AssemblyAI is not wired up
- * yet. For now audio chunks are captured locally (audioChunksRef) so the
- * capture pipeline is proven, and a "type what you're saying" fallback input
- * emits transcript events over Socket.io so the realtime loop is testable
- * end-to-end today. If mic permission is denied we degrade gracefully to
- * text-only mode — never a blocking error.
+ * The browser fetches a short-lived token from the backend
+ * (GET /analysis/stt-token), opens a native WebSocket directly to
+ * AssemblyAI, and streams 16 kHz mono PCM16 chunks captured through
+ * lib/audio.ts (AudioWorklet). Final turns feed the existing realtime loop
+ * via onTranscript; unfinalized turns surface through onPartial.
+ *
+ * Degradation is never blocking: any failure (token fetch, mic permission,
+ * socket error) logs a console.warn, shows a dismissible notice, and the
+ * typed fallback below keeps the realtime loop fully usable.
  */
-export default function VoiceRecorder({ onTranscript }: VoiceRecorderProps) {
-  const [micStatus, setMicStatus] = useState<MicStatus>("requesting");
+export default function VoiceRecorder({
+  onTranscript,
+  onPartial,
+}: VoiceRecorderProps) {
+  const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>("connecting");
+  const [notice, setNotice] = useState<string | null>(null);
   const [typedText, setTypedText] = useState("");
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
+
+  // Callback refs so the streaming effect never sees stale closures and can
+  // keep an empty dependency list (one STT session per mount).
+  const onTranscriptRef = useRef(onTranscript);
+  const onPartialRef = useRef(onPartial);
+  useEffect(() => {
+    onTranscriptRef.current = onTranscript;
+    onPartialRef.current = onPartial;
+  });
 
   useEffect(() => {
     let cancelled = false;
+    let ws: WebSocket | null = null;
+    let mic: MicCapture | null = null;
+    let retriedWithoutKeyterms = false;
 
-    async function startCapture() {
-      if (
-        typeof navigator === "undefined" ||
-        !navigator.mediaDevices?.getUserMedia ||
-        typeof MediaRecorder === "undefined"
-      ) {
-        setMicStatus("denied");
-        return;
+    /** Terminate the STT session and release the mic. NEVER leave a session
+     *  open — AssemblyAI bills until Terminate is sent. */
+    const cleanup = () => {
+      mic?.stop();
+      mic = null;
+      if (ws) {
+        const socket = ws;
+        ws = null;
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onerror = null;
+        socket.onclose = null;
+        if (socket.readyState === WebSocket.OPEN) {
+          try {
+            socket.send(JSON.stringify({ type: "Terminate" }));
+          } catch {
+            // Socket already closing — nothing to terminate.
+          }
+        }
+        socket.close();
+      }
+    };
+
+    /** Non-blocking degradation: warn, notify, keep the typed fallback. */
+    const degrade = (reason: string) => {
+      console.warn(`[VoiceRecorder] ${reason} — falling back to text mode.`);
+      cleanup();
+      if (!cancelled) {
+        setVoiceStatus("unavailable");
+        setNotice("Voice unavailable — using text mode");
+        onPartialRef.current?.("");
+      }
+    };
+
+    const openSocket = (creds: SttTokenResponse, includeKeyterms: boolean) => {
+      const params = new URLSearchParams({
+        sample_rate: "16000",
+        speech_model: "universal-3-5-pro",
+        mode: "balanced",
+        domain: creds.domain,
+        token: creds.token,
+      });
+      if (includeKeyterms && creds.keyterms.length > 0) {
+        params.set("keyterms_prompt", JSON.stringify(creds.keyterms));
       }
 
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-        });
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
+      // Set once the server sends ANY message — an immediate close before
+      // that means the session was rejected (bad param, e.g. keyterms).
+      let sessionBegan = false;
+
+      const socket = new WebSocket(`${ASSEMBLYAI_WSS}?${params.toString()}`);
+      socket.binaryType = "arraybuffer";
+      ws = socket;
+
+      socket.onopen = async () => {
+        if (cancelled || ws !== socket) return;
+        try {
+          const capture = new MicCapture();
+          mic = capture;
+          await capture.start((chunk) => {
+            if (socket.readyState === WebSocket.OPEN) socket.send(chunk);
+          });
+          if (cancelled || ws !== socket) {
+            capture.stop();
+            return;
+          }
+          setVoiceStatus("recording");
+        } catch (err) {
+          degrade(
+            err instanceof MicPermissionError
+              ? err.message
+              : `Mic capture failed: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      };
+
+      socket.onmessage = (event: MessageEvent) => {
+        if (cancelled || ws !== socket) return;
+        sessionBegan = true;
+        let msg: AssemblyAiTurnMessage;
+        try {
+          msg = JSON.parse(String(event.data)) as AssemblyAiTurnMessage;
+        } catch {
+          return; // Non-JSON frame — ignore.
+        }
+        if (msg.type !== "Turn") return;
+        const text = typeof msg.transcript === "string" ? msg.transcript : "";
+        if (msg.end_of_turn === true) {
+          // Final turn — feed the realtime loop; parent accumulates.
+          if (text.trim()) onTranscriptRef.current(text.trim());
+          onPartialRef.current?.("");
+        } else {
+          // Live partial — shown dimmed/italic in LiveTranscript.
+          onPartialRef.current?.(text);
+        }
+      };
+
+      socket.onclose = (event: CloseEvent) => {
+        if (cancelled || ws !== socket) return;
+        // Graceful degradation: if AssemblyAI rejects the session right away
+        // (error/4xx-like close before any message) and we sent
+        // keyterms_prompt, retry ONCE without it.
+        if (!sessionBegan && includeKeyterms && !retriedWithoutKeyterms) {
+          retriedWithoutKeyterms = true;
+          console.warn(
+            `[VoiceRecorder] AssemblyAI closed the session immediately (code ${event.code}) with keyterms_prompt set — retrying once without keyterms.`
+          );
+          mic?.stop();
+          mic = null;
+          setVoiceStatus("connecting");
+          openSocket(creds, false);
           return;
         }
+        degrade(`AssemblyAI socket closed (code ${event.code})`);
+      };
 
-        streamRef.current = stream;
-        const recorder = new MediaRecorder(stream);
-        mediaRecorderRef.current = recorder;
-        recorder.ondataavailable = (event: BlobEvent) => {
-          // Phase 4: forward these chunks to AssemblyAI realtime STT.
-          if (event.data.size > 0) audioChunksRef.current.push(event.data);
-        };
-        recorder.start(1000); // 1s chunks
-        setMicStatus("granted");
-      } catch {
-        // Permission denied or no device — fall back to text mode.
-        if (!cancelled) setMicStatus("denied");
+      socket.onerror = () => {
+        // onclose always follows onerror — degradation is handled there.
+      };
+    };
+
+    (async () => {
+      try {
+        const creds = await getSttToken();
+        if (cancelled) return;
+        openSocket(creds, creds.keyterms.length > 0);
+      } catch (err) {
+        degrade(
+          `STT token fetch failed: ${err instanceof Error ? err.message : String(err)}`
+        );
       }
-    }
-
-    startCapture();
+    })();
 
     return () => {
       cancelled = true;
-      if (mediaRecorderRef.current?.state === "recording") {
-        mediaRecorderRef.current.stop();
-      }
-      mediaRecorderRef.current = null;
-      streamRef.current?.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-      audioChunksRef.current = [];
+      cleanup();
     };
   }, []);
 
@@ -89,8 +209,22 @@ export default function VoiceRecorder({ onTranscript }: VoiceRecorderProps) {
 
   return (
     <div className="space-y-3 rounded-lg border border-border bg-background p-4">
-      {/* Recording status row */}
-      {micStatus === "granted" ? (
+      {/* Dismissible voice-failure notice — never blocks the encounter */}
+      {notice && (
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
+          <span>{notice}</span>
+          <button
+            onClick={() => setNotice(null)}
+            className="shrink-0 font-semibold hover:text-foreground"
+            aria-label="Dismiss"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Recording status row — driven by the actual streaming state */}
+      {voiceStatus === "recording" ? (
         <div className="flex items-center gap-4">
           <span className="flex items-center gap-2 text-sm font-medium text-red-400">
             <span
@@ -100,10 +234,7 @@ export default function VoiceRecorder({ onTranscript }: VoiceRecorderProps) {
             Recording
           </span>
           {/* Simple CSS-animated waveform — no canvas needed */}
-          <div
-            className="flex h-8 items-center gap-1"
-            aria-hidden="true"
-          >
+          <div className="flex h-8 items-center gap-1" aria-hidden="true">
             {WAVEFORM_BARS.map((delay) => (
               <span
                 key={delay}
@@ -113,19 +244,19 @@ export default function VoiceRecorder({ onTranscript }: VoiceRecorderProps) {
             ))}
           </div>
           <span className="text-xs text-muted">
-            Audio captured locally — live transcription arrives in Phase 4
+            Live transcription via AssemblyAI
           </span>
         </div>
-      ) : micStatus === "denied" ? (
+      ) : voiceStatus === "unavailable" ? (
         <p className="text-sm text-muted">
-          Microphone unavailable — continuing in text mode. Type what you would
-          say below.
+          Microphone transcription unavailable — continuing in text mode. Type
+          what you would say below.
         </p>
       ) : (
-        <p className="text-sm text-muted">Requesting microphone access…</p>
+        <p className="text-sm text-muted">Connecting live transcription…</p>
       )}
 
-      {/* Typed fallback — keeps the realtime loop testable end-to-end today */}
+      {/* Typed fallback — always usable, even mid-recording or if voice fails */}
       <form onSubmit={handleTypedSubmit} className="flex gap-2">
         <input
           type="text"

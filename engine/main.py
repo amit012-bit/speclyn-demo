@@ -26,7 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 load_dotenv()
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
-from routers import analyze, health, stream  # noqa: E402 — after env load
+from routers import analyze, health, stream, stt  # noqa: E402 — after env load
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -55,6 +55,7 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(analyze.router)
 app.include_router(stream.router)
+app.include_router(stt.router)
 
 
 if __name__ == "__main__":

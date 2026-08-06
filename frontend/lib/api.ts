@@ -64,6 +64,15 @@ export interface LoginResponse {
   token: string;
 }
 
+export interface SttTokenResponse {
+  /** Short-lived AssemblyAI streaming token (browser connects directly). */
+  token: string;
+  /** Specialty key terms to bias the streaming model (keyterms_prompt). */
+  keyterms: string[];
+  /** AssemblyAI domain hint for the streaming session (e.g. "medical"). */
+  domain: string;
+}
+
 // ---------------------------------------------------------------------------
 // Token storage.
 //
@@ -169,4 +178,11 @@ export function analyzeNote(req: AnalyzeRequest): Promise<AnalysisResult> {
     method: "POST",
     body: req,
   });
+}
+
+/** GET /analysis/stt-token — temporary AssemblyAI streaming credentials
+ *  plus the specialty keyterms/domain for the realtime STT session.
+ *  Throws ApiError on any non-200 response. */
+export function getSttToken(): Promise<SttTokenResponse> {
+  return request<SttTokenResponse>("/analysis/stt-token");
 }
