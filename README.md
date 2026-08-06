@@ -30,9 +30,25 @@ frontend (3000) ──REST + Socket.io──▶ backend (4000) ──REST + WS�
 
 ## LLM strategy
 
-Three-tier fallback, one provider per request: **Claude Opus 4.8 → OpenAI
-GPT-4o → Gemini 1.5 Pro**. A provider is only attempted when its key is
-configured; `GET /health` on the engine reports which are live.
+Three-tier fallback, one provider per request. Default order: **Claude Opus
+4.8 → OpenAI GPT-4o → Gemini 1.5 Pro**. A provider is only attempted when its
+key is configured; `GET /health` reports which are live and the active order.
+
+**Pick your primary from the terminal** — the other two stay as fallbacks:
+
+```powershell
+python main.py                 # default: Claude -> OpenAI -> Gemini
+python main.py --openai        # OpenAI  -> Claude -> Gemini
+python main.py --claude        # Claude  -> OpenAI -> Gemini
+python main.py --gemini        # Gemini  -> Claude -> OpenAI
+python main.py --openai --port 8001 --reload
+```
+
+Running under uvicorn or a deployment platform instead? Set `LLM_PRIMARY`:
+
+```bash
+LLM_PRIMARY=openai uvicorn main:app --port 8000
+```
 
 ## Quick start (local, no Docker)
 

@@ -101,3 +101,7 @@ class HealthResponse(BaseModel):
         default_factory=dict,
         description="Which LLM providers have keys configured, e.g. {'anthropic': false, 'openai': true}",
     )
+    order: list[str] = Field(
+        default_factory=list,
+        description="Active provider chain, primary first (set via --claude/--openai/--gemini or LLM_PRIMARY)",
+    )

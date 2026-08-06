@@ -1,10 +1,13 @@
 """
 llm_orchestrator.py — Three-tier LLM strategy for the Speclyn engine.
 
-Provider order: Claude Opus 4.8 (primary) → OpenAI GPT-4o → Gemini 1.5 Pro.
-Never more than one provider per request cycle — try in order, first success
-wins. A provider is only attempted when its API key is configured, so the
-engine works with any subset of keys present.
+Default provider order: Claude Opus 4.8 → OpenAI GPT-4o → Gemini 1.5 Pro.
+The primary is selectable at launch — CLI flags (--claude / --openai /
+--gemini on `python main.py`) or the LLM_PRIMARY env var — and the remaining
+providers keep their default order as fallbacks. Never more than one provider
+per request cycle: try in order, first success wins. A provider is only
+attempted when its API key is configured, so the engine works with any
+subset of keys present.
 """
 
 import json
@@ -13,22 +16,75 @@ import os
 
 logger = logging.getLogger("speclyn.llm")
 
-ANTHROPIC_MODEL = "claude-opus-4-8"
-OPENAI_MODEL = "gpt-4o"
-GEMINI_MODEL = "gemini-1.5-pro"
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
+# gemini-1.5-pro was retired; 2.5-pro is the current stable. Env-overridable
+# so a model bump never needs a code change again.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
 MAX_TOKENS = 4096
+# Per-provider call timeout — a hanging provider must not stall the chain.
+PROVIDER_TIMEOUT_SECONDS = 60
 
 
 class LLMError(Exception):
     """Raised when every configured provider fails (or none are configured)."""
 
 
+DEFAULT_ORDER = ["anthropic", "openai", "gemini"]
+
+# Accepted spellings for provider selection (CLI flags / LLM_PRIMARY env var).
+PROVIDER_ALIASES = {
+    "claude": "anthropic",
+    "anthropic": "anthropic",
+    "openai": "openai",
+    "gpt": "openai",
+    "gemini": "gemini",
+    "google": "gemini",
+}
+
+
+def resolve_provider_name(name: str) -> str | None:
+    """Map a user-supplied provider spelling to its canonical name."""
+    return PROVIDER_ALIASES.get((name or "").strip().lower())
+
+
+def provider_order() -> list[str]:
+    """Active provider chain: LLM_PRIMARY (if set) first, then the default
+    order as fallbacks. Unknown LLM_PRIMARY values are ignored with the
+    default order preserved."""
+    order = DEFAULT_ORDER.copy()
+    primary = resolve_provider_name(os.environ.get("LLM_PRIMARY", ""))
+    if primary in order:
+        order.remove(primary)
+        order.insert(0, primary)
+    return order
+
+
+def _key_usable(env_var: str) -> bool:
+    """A key is usable only if present AND clean printable ASCII.
+
+    A key with a stray non-ASCII/whitespace character (a common copy-paste
+    accident) produces 'Illegal header value' errors that some SDKs retry
+    forever — observed hanging the chain for minutes. Treat such keys as
+    not configured and say why, so the fallback engages immediately."""
+    key = os.environ.get(env_var, "")
+    if not key:
+        return False
+    if not all(32 < ord(c) < 127 for c in key):
+        logger.warning(
+            "%s contains whitespace or non-ASCII characters — ignoring it. "
+            "Re-copy the key cleanly into your .env.", env_var,
+        )
+        return False
+    return True
+
+
 def available_providers() -> dict[str, bool]:
-    """Which providers have API keys configured — used by /health."""
+    """Which providers have usable API keys — used by /health."""
     return {
-        "anthropic": bool(os.environ.get("ANTHROPIC_API_KEY")),
-        "openai": bool(os.environ.get("OPENAI_API_KEY")),
-        "gemini": bool(os.environ.get("GEMINI_API_KEY")),
+        "anthropic": _key_usable("ANTHROPIC_API_KEY"),
+        "openai": _key_usable("OPENAI_API_KEY"),
+        "gemini": _key_usable("GEMINI_API_KEY"),
     }
 
 
@@ -40,7 +96,9 @@ def available_providers() -> dict[str, bool]:
 def _call_anthropic(system_prompt: str, user_prompt: str) -> str:
     from anthropic import Anthropic
 
-    client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    client = Anthropic(
+        api_key=os.environ["ANTHROPIC_API_KEY"], timeout=PROVIDER_TIMEOUT_SECONDS
+    )
     response = client.messages.create(
         model=ANTHROPIC_MODEL,
         max_tokens=MAX_TOKENS,
@@ -55,7 +113,9 @@ def _call_anthropic(system_prompt: str, user_prompt: str) -> str:
 def _call_openai(system_prompt: str, user_prompt: str) -> str:
     from openai import OpenAI
 
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    client = OpenAI(
+        api_key=os.environ["OPENAI_API_KEY"], timeout=PROVIDER_TIMEOUT_SECONDS
+    )
     response = client.chat.completions.create(
         model=OPENAI_MODEL,
         max_tokens=MAX_TOKENS,
@@ -69,23 +129,32 @@ def _call_openai(system_prompt: str, user_prompt: str) -> str:
 
 
 def _call_gemini(system_prompt: str, user_prompt: str) -> str:
-    import google.generativeai as genai
+    # Uses the current google-genai SDK (the older google-generativeai
+    # package is end-of-life and must not be used).
+    from google import genai
+    from google.genai import types
 
-    genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-    model = genai.GenerativeModel(
-        GEMINI_MODEL,
-        system_instruction=system_prompt,
-        generation_config={"response_mime_type": "application/json"},
+    client = genai.Client(
+        api_key=os.environ["GEMINI_API_KEY"],
+        http_options=types.HttpOptions(timeout=PROVIDER_TIMEOUT_SECONDS * 1000),
     )
-    response = model.generate_content(user_prompt)
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=user_prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            response_mime_type="application/json",
+            max_output_tokens=MAX_TOKENS,
+        ),
+    )
     return (response.text or "").strip()
 
 
-_PROVIDERS = [
-    ("anthropic", _call_anthropic),
-    ("openai", _call_openai),
-    ("gemini", _call_gemini),
-]
+_CALLERS = {
+    "anthropic": _call_anthropic,
+    "openai": _call_openai,
+    "gemini": _call_gemini,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +195,10 @@ def run_analysis(system_prompt: str, user_prompt: str) -> tuple[dict, str]:
     Returns (parsed_json, provider_name). Raises LLMError when no provider
     is configured or every configured provider fails.
     """
-    configured = [(name, fn) for name, fn in _PROVIDERS if available_providers()[name]]
+    keys = available_providers()
+    configured = [
+        (name, _CALLERS[name]) for name in provider_order() if keys[name]
+    ]
     if not configured:
         raise LLMError(
             "No LLM provider configured. Set at least one of ANTHROPIC_API_KEY, "
