@@ -17,6 +17,12 @@ const WAVEFORM_BARS = [0, 150, 300, 450, 600, 750, 900];
 
 const ASSEMBLYAI_WSS = "wss://streaming.assemblyai.com/v3/ws";
 
+function formatElapsed(totalSeconds: number): string {
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
 /** Shape of AssemblyAI v3 streaming messages we care about. */
 interface AssemblyAiTurnMessage {
   type?: string;
@@ -44,6 +50,14 @@ export default function VoiceRecorder({
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>("connecting");
   const [notice, setNotice] = useState<string | null>(null);
   const [typedText, setTypedText] = useState("");
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  // Recording elapsed time — mirrors the session timer (§3.7).
+  useEffect(() => {
+    if (voiceStatus !== "recording") return;
+    const interval = setInterval(() => setElapsedSeconds((s) => s + 1), 1000);
+    return () => clearInterval(interval);
+  }, [voiceStatus]);
 
   // Callback refs so the streaming effect never sees stale closures and can
   // keep an empty dependency list (one STT session per mount).
@@ -226,19 +240,22 @@ export default function VoiceRecorder({
       {/* Recording status row — driven by the actual streaming state */}
       {voiceStatus === "recording" ? (
         <div className="flex items-center gap-4">
-          <span className="flex items-center gap-2 text-sm font-medium text-red-400">
+          <span className="flex items-center gap-2 text-[13px] font-medium text-danger-bright">
             <span
-              className="h-3 w-3 animate-pulse-red rounded-full bg-red-500"
+              className="h-2.5 w-2.5 animate-pulse-red rounded-full bg-danger"
               aria-hidden="true"
             />
             Recording
+          </span>
+          <span className="text-xs tabular-nums text-muted">
+            {formatElapsed(elapsedSeconds)}
           </span>
           {/* Simple CSS-animated waveform — no canvas needed */}
           <div className="flex h-8 items-center gap-1" aria-hidden="true">
             {WAVEFORM_BARS.map((delay) => (
               <span
                 key={delay}
-                className="h-full w-1.5 origin-center animate-wave rounded-full bg-primary/80"
+                className="h-full w-[5px] origin-center animate-wave rounded-full bg-primary-bright/80 motion-reduce:h-2/5 motion-reduce:animate-none"
                 style={{ animationDelay: `${delay}ms` }}
               />
             ))}
@@ -263,12 +280,12 @@ export default function VoiceRecorder({
           value={typedText}
           onChange={(e) => setTypedText(e.target.value)}
           placeholder="Type what you're saying…"
-          className="flex-1 rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground placeholder-muted/60 outline-none transition focus:border-primary focus:ring-1 focus:ring-primary/40"
+          className="flex-1 rounded-lg border border-border-strong bg-surface px-3 py-2 text-sm text-foreground placeholder-muted outline-none transition focus:border-primary"
         />
         <button
           type="submit"
           disabled={!typedText.trim()}
-          className="rounded-lg border border-primary/60 px-4 py-2 text-sm font-medium text-primary transition hover:bg-primary hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+          className="rounded-lg border border-primary/60 px-4 py-2 text-sm font-medium text-primary-bright transition hover:bg-primary-strong hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
         >
           Send
         </button>

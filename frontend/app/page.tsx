@@ -40,50 +40,56 @@ export default function LoginPage() {
 
   return (
     <main className="flex flex-1 items-center justify-center px-6 py-16">
-      <div className="w-full max-w-md rounded-2xl border border-border bg-surface p-10 shadow-2xl shadow-black/40">
-        <div className="mb-10 text-center">
-          <h1 className="text-5xl font-bold tracking-tight text-foreground">
-            Speclyn
-          </h1>
-          <p className="mt-3 text-base text-muted">
-            Clinical documentation intelligence
-          </p>
-        </div>
-
-        <form onSubmit={handleSubmit} className="space-y-5">
-          <div>
-            <label
-              htmlFor="password"
-              className="mb-2 block text-sm font-medium text-muted"
-            >
-              Access password
-            </label>
-            <input
-              id="password"
-              type="password"
-              autoFocus
-              autoComplete="current-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Enter password"
-              className="w-full rounded-lg border border-border bg-background px-4 py-3 text-foreground placeholder-muted/60 outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/40"
-            />
+      <div className="w-full max-w-md">
+        <div className="rounded-2xl border border-border bg-surface p-10 shadow-[0_16px_40px_rgba(0,0,0,0.55)]">
+          <div className="mb-10 text-center">
+            <h1 className="text-4xl font-bold tracking-[-0.01em] text-foreground">
+              Speclyn
+            </h1>
+            <p className="mt-3 text-sm tracking-[0.02em] text-muted">
+              Clinical documentation intelligence
+            </p>
           </div>
 
-          {errorMessage && (
-            <p className="rounded-lg border border-warning/40 bg-warning/10 px-4 py-2.5 text-sm text-warning">
-              {errorMessage}
-            </p>
-          )}
+          <form onSubmit={handleSubmit} className="space-y-5">
+            <div>
+              <label
+                htmlFor="password"
+                className="mb-2 block text-sm font-medium text-muted"
+              >
+                Access password
+              </label>
+              <input
+                id="password"
+                type="password"
+                autoFocus
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Enter password"
+                className="h-11 w-full rounded-lg border border-border-strong bg-background px-4 text-foreground placeholder-muted outline-none transition focus:border-primary"
+              />
+            </div>
 
-          <button
-            type="submit"
-            disabled={loginMutation.isPending || !password.trim()}
-            className="w-full rounded-lg bg-primary px-4 py-3 font-semibold text-white transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {loginMutation.isPending ? "Signing in…" : "Sign in"}
-          </button>
-        </form>
+            {errorMessage && (
+              <p className="rounded-lg border border-danger/40 bg-danger/10 px-4 py-2.5 text-sm text-danger-bright">
+                {errorMessage}
+              </p>
+            )}
+
+            <button
+              type="submit"
+              disabled={loginMutation.isPending || !password.trim()}
+              className="h-11 w-full rounded-lg bg-primary-strong px-4 text-sm font-semibold text-white transition hover:bg-[#1D4ED8] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {loginMutation.isPending ? "Signing in…" : "Sign in"}
+            </button>
+          </form>
+        </div>
+
+        <p className="mt-6 text-center text-xs text-muted">
+          Demo environment · No real patient data
+        </p>
       </div>
     </main>
   );

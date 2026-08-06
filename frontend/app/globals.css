@@ -3,8 +3,26 @@
 @tailwind utilities;
 
 body {
-  color: #f9fafb;
+  color: #e5e7eb;
   background: #0f1117;
+}
+
+/* Global focus style — SPECLYN_DESIGN_SPEC §2.6.
+   7.42:1 vs background — passes SC 1.4.11. Replaces all ring-primary/40. */
+:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 2px;
+}
+
+/* Mandatory reduced-motion gate — SPECLYN_DESIGN_SPEC §2.6 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* Subtle scrollbars that fit the dark clinical theme */
@@ -20,7 +38,7 @@ body {
   border-radius: 5px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #4a5568;
+  background: #4b5563;
 }
 
 /*
