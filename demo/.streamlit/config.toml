@@ -1,0 +1,10 @@
+# Locks a consistent, professional light theme so the UI renders identically
+# regardless of the viewer's OS dark/light preference. This is what prevents
+# light content cards from rendering with invisible (light) text.
+[theme]
+base = "light"
+primaryColor = "#0E5A8A"
+backgroundColor = "#F4F7FB"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#14233A"
+font = "sans serif"

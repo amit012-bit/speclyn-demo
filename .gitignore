@@ -1,6 +1,11 @@
-# Environment / secrets
+# Environment / secrets — never commit any .env at any level
 .env
+.env.local
+*.env.local
+**/.env
+**/.env.local
 .streamlit/secrets.toml
+**/.streamlit/secrets.toml
 
 # Python
 __pycache__/
@@ -10,6 +15,13 @@ __pycache__/
 venv/
 .venv/
 env/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+npm-debug.log*
 
 # OS / editor
 .DS_Store

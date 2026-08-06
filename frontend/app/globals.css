@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  color: #f9fafb;
+  background: #0f1117;
+}
+
+/* Subtle scrollbars that fit the dark clinical theme */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: #0f1117;
+}
+::-webkit-scrollbar-thumb {
+  background: #2d3748;
+  border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #4a5568;
+}
+
+/*
+ * Print stylesheet — "Export as PDF" is implemented via window.print()
+ * for the pilot. Only the analysis panel (#analysis-print) is printed,
+ * re-themed for white paper.
+ */
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #111827 !important;
+  }
+
+  body * {
+    visibility: hidden;
+  }
+
+  #analysis-print,
+  #analysis-print * {
+    visibility: visible;
+  }
+
+  #analysis-print {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    max-height: none !important;
+    overflow: visible !important;
+    padding: 24px !important;
+  }
+
+  #analysis-print,
+  #analysis-print * {
+    background: #ffffff !important;
+    color: #111827 !important;
+    border-color: #d1d5db !important;
+    box-shadow: none !important;
+  }
+
+  /* Keep the revenue number green on paper — first thing a CFO sees */
+  #analysis-print .print-revenue {
+    color: #059669 !important;
+  }
+
+  #analysis-print .print-hide {
+    display: none !important;
+  }
+}
